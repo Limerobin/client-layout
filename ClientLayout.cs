@@ -20,7 +20,11 @@ static class NativeMethods
     public const int GWL_STYLE = -16;
     public const int GWL_EXSTYLE = -20;
 
+    public const int WS_POPUP = unchecked((int)0x80000000);
+    public const int WS_VISIBLE = 0x10000000;
+    public const int WS_CLIPSIBLINGS = 0x04000000;
     public const int WS_CAPTION = 0x00C00000;
+    public const int WS_SYSMENU = 0x00080000;
     public const int WS_THICKFRAME = 0x00040000;
     public const int WS_MINIMIZEBOX = 0x00020000;
     public const int WS_MAXIMIZEBOX = 0x00010000;
@@ -84,6 +88,21 @@ static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetWindowRect(IntPtr hWnd, out Rect rect);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetClientRect(IntPtr hWnd, out Rect rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool ClientToScreen(IntPtr hWnd, ref Point point);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool AdjustWindowRectEx(ref Rect lpRect, int dwStyle, bool bMenu, int dwExStyle);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool AdjustWindowRectExForDpi(ref Rect lpRect, int dwStyle, bool bMenu, int dwExStyle, uint dpi);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hwnd);
+
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
     public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
 
@@ -112,6 +131,13 @@ static class NativeMethods
     public struct Rect
     {
         public int Left, Top, Right, Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Point
+    {
+        public int X;
+        public int Y;
     }
 }
 
@@ -338,21 +364,17 @@ static class WindowOps
 
     public static void SetBorderless(IntPtr hwnd, bool borderless)
     {
-        int style = GetStyle(hwnd);
-        int ex = GetExStyle(hwnd);
-        if (borderless)
+        int x, y, width, height;
+        bool haveClient = TryClientScreen(hwnd, out x, out y, out width, out height);
+        ApplyChrome(hwnd, borderless, ref x, ref y, ref width, ref height, haveClient);
+        if (!haveClient)
         {
-            style &= ~(NativeMethods.WS_CAPTION | NativeMethods.WS_THICKFRAME | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_MAXIMIZEBOX);
-            ex &= ~(NativeMethods.WS_EX_DLGMODALFRAME | NativeMethods.WS_EX_CLIENTEDGE | NativeMethods.WS_EX_STATICEDGE | NativeMethods.WS_EX_WINDOWEDGE);
+            ForceFrame(hwnd);
+            return;
         }
-        else
-        {
-            style |= NativeMethods.WS_OVERLAPPEDWINDOW;
-        }
-
-        NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_STYLE, new IntPtr(style));
-        NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE, new IntPtr(ex));
-        ApplyCorner(hwnd, borderless);
+        CommitRect(
+            hwnd, IntPtr.Zero, x, y, width, height,
+            NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER);
     }
 
     public static void SetTopMost(IntPtr hwnd, bool topMost)
@@ -369,23 +391,121 @@ static class WindowOps
     {
         if (!NativeMethods.IsWindow(hwnd)) return;
         if (NativeMethods.IsIconic(hwnd)) NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
-        SetBorderless(hwnd, slot.Borderless);
-        bool ok = NativeMethods.SetWindowPos(
+        int x = 0, y = 0, width = 0, height = 0;
+        ApplyChrome(hwnd, slot.Borderless, ref x, ref y, ref width, ref height, false);
+        CommitRect(
             hwnd,
             slot.TopMost ? NativeMethods.HWND_TOPMOST : NativeMethods.HWND_NOTOPMOST,
             slot.X, slot.Y, slot.Width, slot.Height,
-            NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
-        if (!ok) throw new Win32Exception();
+            NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
     }
 
     public static void RefreshFrame(IntPtr hwnd)
     {
         NativeMethods.Rect rect;
         if (!NativeMethods.GetWindowRect(hwnd, out rect)) return;
-        NativeMethods.SetWindowPos(
+        CommitRect(
             hwnd, IntPtr.Zero,
             rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top,
-            NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER);
+            NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER);
+    }
+
+    // Drop the overlapped frame so the window rect is the client rect. WoW maps the
+    // pointer from the window rect; a leftover caption or border offsets every click.
+    // WS_SYSMENU without a caption keeps Alt+Space and does not add that frame.
+    static void ApplyChrome(IntPtr hwnd, bool borderless, ref int x, ref int y, ref int width, ref int height, bool fitClient)
+    {
+        int style = GetStyle(hwnd);
+        int ex = GetExStyle(hwnd);
+        if (borderless)
+        {
+            style &= ~(NativeMethods.WS_CAPTION | NativeMethods.WS_THICKFRAME | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_MAXIMIZEBOX | NativeMethods.WS_SYSMENU | NativeMethods.WS_OVERLAPPEDWINDOW);
+            style |= NativeMethods.WS_POPUP | NativeMethods.WS_VISIBLE | NativeMethods.WS_CLIPSIBLINGS | NativeMethods.WS_SYSMENU;
+            ex &= ~(NativeMethods.WS_EX_DLGMODALFRAME | NativeMethods.WS_EX_CLIENTEDGE | NativeMethods.WS_EX_STATICEDGE | NativeMethods.WS_EX_WINDOWEDGE);
+        }
+        else
+        {
+            style &= ~NativeMethods.WS_POPUP;
+            style |= NativeMethods.WS_OVERLAPPEDWINDOW | NativeMethods.WS_VISIBLE;
+            ex |= NativeMethods.WS_EX_WINDOWEDGE;
+            if (fitClient)
+                ExpandForFrame(hwnd, style, ex, ref x, ref y, ref width, ref height);
+        }
+
+        NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_STYLE, new IntPtr(style));
+        NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE, new IntPtr(ex));
+        ApplyCorner(hwnd, borderless);
+    }
+
+    static void ExpandForFrame(IntPtr hwnd, int style, int ex, ref int x, ref int y, ref int width, ref int height)
+    {
+        var rect = new NativeMethods.Rect { Left = x, Top = y, Right = x + width, Bottom = y + height };
+        bool adjusted = false;
+        try
+        {
+            uint dpi = NativeMethods.GetDpiForWindow(hwnd);
+            if (dpi != 0)
+                adjusted = NativeMethods.AdjustWindowRectExForDpi(ref rect, style, false, ex, dpi);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            adjusted = false;
+        }
+        if (!adjusted)
+        {
+            rect = new NativeMethods.Rect { Left = x, Top = y, Right = x + width, Bottom = y + height };
+            adjusted = NativeMethods.AdjustWindowRectEx(ref rect, style, false, ex);
+        }
+        if (!adjusted) throw new Win32Exception();
+        x = rect.Left;
+        y = rect.Top;
+        width = rect.Right - rect.Left;
+        height = rect.Bottom - rect.Top;
+    }
+
+    static bool TryClientScreen(IntPtr hwnd, out int x, out int y, out int width, out int height)
+    {
+        x = 0;
+        y = 0;
+        width = 0;
+        height = 0;
+        NativeMethods.Rect client;
+        if (!NativeMethods.GetClientRect(hwnd, out client)) return false;
+        var origin = new NativeMethods.Point();
+        if (!NativeMethods.ClientToScreen(hwnd, ref origin)) return false;
+        x = origin.X;
+        y = origin.Y;
+        width = client.Right - client.Left;
+        height = client.Bottom - client.Top;
+        return width > 0 && height > 0;
+    }
+
+    static void ForceFrame(IntPtr hwnd)
+    {
+        bool ok = NativeMethods.SetWindowPos(
+            hwnd, IntPtr.Zero, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER | NativeMethods.SWP_FRAMECHANGED);
+        if (!ok) throw new Win32Exception();
+    }
+
+    static void CommitRect(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags)
+    {
+        bool ok = NativeMethods.SetWindowPos(
+            hwnd, insertAfter, x, y, width, height,
+            flags | NativeMethods.SWP_FRAMECHANGED);
+        if (!ok) throw new Win32Exception();
+        NudgeSize(hwnd, width, height);
+    }
+
+    // One pixel wider, then the exact size, so the game rereads mouse bounds and is not left short.
+    static void NudgeSize(IntPtr hwnd, int width, int height)
+    {
+        if (width < 1 || height < 1) return;
+        uint flags = NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER;
+        bool ok = NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, 0, 0, width + 1, height, flags);
+        if (!ok) throw new Win32Exception();
+        ok = NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, 0, 0, width, height, flags | NativeMethods.SWP_FRAMECHANGED);
+        if (!ok) throw new Win32Exception();
     }
 
     public static int NearestSlot(WindowInfo win, IList<Slot> slots, HashSet<int> claimed)
@@ -1170,30 +1290,52 @@ static class SelfTest
 
         try
         {
+            int clientX, clientY, clientW, clientH;
+            if (!ClientScreen(hwnd, out clientX, out clientY, out clientW, out clientH))
+                errors.Add("no client before borderless");
+            else
+            {
+                WindowOps.SetBorderless(hwnd, true);
+                WindowOps.RefreshFrame(hwnd);
+                int removed = WindowOps.GetStyle(hwnd);
+                if ((removed & NativeMethods.WS_POPUP) == 0) errors.Add("popup not set: " + removed.ToString("X"));
+                if ((removed & NativeMethods.WS_CAPTION) != 0) errors.Add("caption still set: " + removed.ToString("X"));
+                if ((removed & NativeMethods.WS_THICKFRAME) != 0) errors.Add("thick frame still set: " + removed.ToString("X"));
+                AssertRect(errors, hwnd, clientX, clientY, clientW, clientH, "remove border");
+                AssertNoFrame(errors, hwnd, "remove border");
+            }
+
             var slot = new Slot { X = 80, Y = 60, Width = 640, Height = 400, Borderless = true, TopMost = true };
             WindowOps.Place(hwnd, slot);
             int style = WindowOps.GetStyle(hwnd);
             int ex = WindowOps.GetExStyle(hwnd);
-            if ((style & NativeMethods.WS_CAPTION) != 0) errors.Add("caption still set: " + style.ToString("X"));
-            if ((style & NativeMethods.WS_THICKFRAME) != 0) errors.Add("thick frame still set: " + style.ToString("X"));
+            if ((style & NativeMethods.WS_POPUP) == 0) errors.Add("popup not set after place: " + style.ToString("X"));
+            if ((style & NativeMethods.WS_CAPTION) != 0) errors.Add("caption still set after place: " + style.ToString("X"));
+            if ((style & NativeMethods.WS_THICKFRAME) != 0) errors.Add("thick frame still set after place: " + style.ToString("X"));
             if ((ex & NativeMethods.WS_EX_TOPMOST) == 0) errors.Add("topmost not set: " + ex.ToString("X"));
-            NativeMethods.Rect rect;
-            if (!NativeMethods.GetWindowRect(hwnd, out rect)) errors.Add("no rect");
-            else
-            {
-                int w = rect.Right - rect.Left;
-                int h = rect.Bottom - rect.Top;
-                if (Math.Abs(rect.Left - 80) > 8 || Math.Abs(rect.Top - 60) > 8 || Math.Abs(w - 640) > 8 || Math.Abs(h - 400) > 8)
-                    errors.Add("rect " + rect.Left + "," + rect.Top + " " + w + "x" + h);
-            }
+            int edge = NativeMethods.WS_EX_DLGMODALFRAME | NativeMethods.WS_EX_CLIENTEDGE | NativeMethods.WS_EX_STATICEDGE | NativeMethods.WS_EX_WINDOWEDGE;
+            if ((ex & edge) != 0) errors.Add("edge style remains: " + ex.ToString("X"));
+            AssertRect(errors, hwnd, 80, 60, 640, 400, "place");
+            AssertNoFrame(errors, hwnd, "place");
 
+            int keptX, keptY, keptW, keptH;
+            if (!ClientScreen(hwnd, out keptX, out keptY, out keptW, out keptH))
+                errors.Add("no client before restore");
             WindowOps.SetBorderless(hwnd, false);
             WindowOps.SetTopMost(hwnd, false);
             WindowOps.RefreshFrame(hwnd);
             style = WindowOps.GetStyle(hwnd);
             ex = WindowOps.GetExStyle(hwnd);
+            if ((style & NativeMethods.WS_POPUP) != 0) errors.Add("popup still set: " + style.ToString("X"));
             if ((style & NativeMethods.WS_CAPTION) == 0) errors.Add("caption was not restored: " + style.ToString("X"));
             if ((ex & NativeMethods.WS_EX_TOPMOST) != 0) errors.Add("topmost was not cleared: " + ex.ToString("X"));
+            int restoredX, restoredY, restoredW, restoredH;
+            if (ClientScreen(hwnd, out restoredX, out restoredY, out restoredW, out restoredH))
+            {
+                if (restoredX != keptX || restoredY != keptY || restoredW != keptW || restoredH != keptH)
+                    errors.Add("restore moved client from " + keptX + "," + keptY + " " + keptW + "x" + keptH + " to " + restoredX + "," + restoredY + " " + restoredW + "x" + restoredH);
+            }
+            else errors.Add("no client after restore");
         }
         catch (Exception ex)
         {
@@ -1204,6 +1346,57 @@ static class SelfTest
             NativeMethods.PostMessage(hwnd, NativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
             thread.Join(3000);
         }
+    }
+
+    static bool ClientScreen(IntPtr hwnd, out int x, out int y, out int width, out int height)
+    {
+        x = 0;
+        y = 0;
+        width = 0;
+        height = 0;
+        NativeMethods.Rect client;
+        if (!NativeMethods.GetClientRect(hwnd, out client)) return false;
+        var origin = new NativeMethods.Point();
+        if (!NativeMethods.ClientToScreen(hwnd, ref origin)) return false;
+        x = origin.X;
+        y = origin.Y;
+        width = client.Right - client.Left;
+        height = client.Bottom - client.Top;
+        return true;
+    }
+
+    static void AssertRect(List<string> errors, IntPtr hwnd, int x, int y, int width, int height, string label)
+    {
+        NativeMethods.Rect window;
+        if (!NativeMethods.GetWindowRect(hwnd, out window))
+        {
+            errors.Add(label + " has no window rect");
+            return;
+        }
+        int w = window.Right - window.Left;
+        int h = window.Bottom - window.Top;
+        if (window.Left != x || window.Top != y || w != width || h != height)
+            errors.Add(label + " rect " + window.Left + "," + window.Top + " " + w + "x" + h + " expected " + x + "," + y + " " + width + "x" + height);
+    }
+
+    static void AssertNoFrame(List<string> errors, IntPtr hwnd, string label)
+    {
+        NativeMethods.Rect window;
+        if (!NativeMethods.GetWindowRect(hwnd, out window))
+        {
+            errors.Add(label + " has no window rect");
+            return;
+        }
+        int cx, cy, cw, ch;
+        if (!ClientScreen(hwnd, out cx, out cy, out cw, out ch))
+        {
+            errors.Add(label + " has no client rect");
+            return;
+        }
+        int ww = window.Right - window.Left;
+        int wh = window.Bottom - window.Top;
+        if (cx != window.Left || cy != window.Top || cw != ww || ch != wh)
+            errors.Add(label + " non-client inset window " + window.Left + "," + window.Top + " " + ww + "x" + wh + " client " + cx + "," + cy + " " + cw + "x" + ch);
     }
 }
 
