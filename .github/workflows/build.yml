@@ -1,0 +1,25 @@
+name: Build ClientLayout
+
+on:
+  push:
+    branches:
+      - master
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile ClientLayout.exe
+        shell: cmd
+        run: |
+          "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /win32manifest:"${{ github.workspace }}\app.manifest" /out:"${{ github.workspace }}\ClientLayout.exe" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Runtime.Serialization.dll "${{ github.workspace }}\ClientLayout.cs"
+
+      - name: Upload ClientLayout.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClientLayout
+          path: ${{ github.workspace }}\ClientLayout.exe

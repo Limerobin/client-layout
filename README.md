@@ -28,3 +28,5 @@ From this folder, with the .NET Framework compiler that ships with Windows:
 ```
 %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /win32manifest:app.manifest /out:ClientLayout.exe /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Runtime.Serialization.dll ClientLayout.cs
 ```
+
+A push to `main` or `master` runs that same compile on GitHub Actions and uploads `ClientLayout.exe` as the `ClientLayout` artifact.
