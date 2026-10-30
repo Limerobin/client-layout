@@ -6,6 +6,9 @@ on:
       - master
       - main
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -23,3 +26,18 @@ jobs:
         with:
           name: ClientLayout
           path: ${{ github.workspace }}\ClientLayout.exe
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest
+          body: |
+            `ClientLayout.exe` built from `${{ github.sha }}`.
+
+            Download **ClientLayout.exe** below, put it next to your game (or anywhere), and start it.
+          files: ${{ github.workspace }}\ClientLayout.exe
+          draft: false
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true

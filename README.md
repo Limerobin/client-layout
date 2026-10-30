@@ -6,7 +6,7 @@ It works with the Wrath 3.3.5 client and with World of Warcraft: Forever. It onl
 
 ## Use
 
-1. Build `ClientLayout.exe` (see below) and start it.
+1. Download `ClientLayout.exe` from the [latest release](https://github.com/Limerobin/client-layout/releases/latest) and start it.
 2. Browse to that game's `Wow.exe` if the path is not already filled in.
 3. Open the clients and drag each window where you want it.
 4. Select the small window, then click **Remove border** and **Keep on top**. Leave the main window with its border and **Not on top**.
@@ -29,4 +29,4 @@ From this folder, with the .NET Framework compiler that ships with Windows:
 %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /win32manifest:app.manifest /out:ClientLayout.exe /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Runtime.Serialization.dll ClientLayout.cs
 ```
 
-A push to `main` or `master` runs that same compile on GitHub Actions and uploads `ClientLayout.exe` as the `ClientLayout` artifact.
+A push to `main` or `master` runs that same compile on GitHub Actions and publishes `ClientLayout.exe` on the [latest release](https://github.com/Limerobin/client-layout/releases/latest).
